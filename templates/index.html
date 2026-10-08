@@ -1,0 +1,698 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AuthenticAI — Forensics Unit</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Special+Elite&family=IBM+Plex+Mono:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+
+<div class="grain"></div>
+
+<!-- ================= INTRO SEQUENCE ================= -->
+<div class="intro" id="introOverlay" title="Click to skip">
+  <div class="intro-grain"></div>
+  <div class="intro-stage">
+
+    <!-- Stage 1 — sealed case lock, biometric-scan rig -->
+    <div class="intro-lock" id="introLock">
+      <div class="lock-scan-wrap">
+        <svg class="lock-ring" viewBox="0 0 140 140" aria-hidden="true">
+          <circle class="lock-ring-track" cx="70" cy="70" r="60" pathLength="1" />
+          <circle class="lock-ring-sweep" cx="70" cy="70" r="60" pathLength="1" />
+        </svg>
+        <div class="lock-reticle">
+          <span class="lr-corner tl"></span>
+          <span class="lr-corner tr"></span>
+          <span class="lr-corner bl"></span>
+          <span class="lr-corner br"></span>
+        </div>
+        <svg class="lock-svg" viewBox="0 0 100 110" aria-hidden="true">
+          <path class="lock-shackle" d="M 30 50 V 32 A 20 20 0 0 1 70 32 V 50" />
+          <rect class="lock-body" x="15" y="50" width="70" height="52" rx="7" />
+          <circle class="lock-dot" cx="50" cy="72" r="4.5" />
+          <rect class="lock-slot" x="47.5" y="75" width="5" height="13" rx="1.5" />
+        </svg>
+        <div class="lock-laser"></div>
+      </div>
+      <div class="lock-readout">
+        <span class="lock-caption">Case file sealed<span class="lock-caption-suffix"> · unsealed</span></span>
+        <span class="lock-percent" id="lockPercent">SCANNING SEAL — 000%</span>
+      </div>
+    </div>
+
+    <!-- Stage 2 — typed briefing, console-style decrypt readout -->
+    <div class="intro-terminal" id="introTerminal">
+      <div class="term-chrome">
+        <span class="term-dot dot-a"></span>
+        <span class="term-dot dot-b"></span>
+        <span class="term-dot dot-c"></span>
+        <span class="term-title">ARCHIVE://SECURE_TERMINAL</span>
+      </div>
+      <div class="term-body">
+        <div class="term-scanline"></div>
+        <pre id="introTypeText" aria-live="polite"></pre>
+        <div class="term-meter"><div class="term-meter-fill" id="termMeterFill"></div></div>
+      </div>
+    </div>
+  </div>
+  <div class="intro-skip">Skip ▸</div>
+</div>
+
+<!-- Stage 3 — blueprint of THIS page, traced from its real layout, then
+     dissolved so the drawing becomes the actual rendered site underneath -->
+<svg class="intro-blueprint" id="introBlueprint" aria-hidden="true"></svg>
+<!-- =============== END INTRO SEQUENCE =============== -->
+
+<div class="shell">
+  <header class="site-header">
+    <div class="header-inner">
+      <div class="brand">
+        <div class="brand-mark">AI</div>
+        <div>
+          <div class="brand-title">AuthenticAI</div>
+          <div class="brand-sub">Multimodal Forensics Unit</div>
+        </div>
+      </div>
+      <div class="case-meta">
+        <span class="case-label">Case No.</span>
+        <span class="case-number" id="caseNumber">—</span>
+      </div>
+    </div>
+  </header>
+
+  <main>
+    <section class="hero">
+      <p class="eyebrow">Synthetic media analysis · three specialist pipelines</p>
+      <h1>Every pixel<br><span>tells on itself.</span></h1>
+      <p class="hero-copy">
+        Submit a photo, clip, or recording as an exhibit. Each pipeline is a specialist
+        trained on one kind of forgery — face morphs, AI generation, audio synthesis,
+        or frame-by-frame video tampering.
+      </p>
+    </section>
+
+    <section class="file-card">
+      <nav class="folder-tabs" id="folderTabs">
+        <button class="tab active" data-type="face_morph" type="button">
+          <span class="tab-index">FM</span>
+          <span class="tab-name">Face Morphing</span>
+          <span class="tab-sub">Vision fusion</span>
+        </button>
+        <button class="tab" data-type="ai_generated" type="button">
+          <span class="tab-index">AI</span>
+          <span class="tab-name">AI Generated</span>
+          <span class="tab-sub">EffNet-B1 × 5</span>
+        </button>
+        <button class="tab" data-type="audio" type="button">
+          <span class="tab-index">AU</span>
+          <span class="tab-name">Audio Deepfake</span>
+          <span class="tab-sub">MFCC + CNN</span>
+        </button>
+        <button class="tab" data-type="video" type="button">
+          <span class="tab-index">VD</span>
+          <span class="tab-name">Video</span>
+          <span class="tab-sub">Frame analysis</span>
+        </button>
+      </nav>
+
+      <div class="file-body">
+        <div class="exhibit-tag">
+          <span>Exhibit</span>
+          <strong id="modeText">FACE MORPHING</strong>
+        </div>
+
+        <div class="upload" id="uploadBox" tabindex="0">
+          <div class="upload-inner">
+            <div class="upload-icon" id="uploadIcon">⬡</div>
+            <h2 id="uploadTitle">Submit an image</h2>
+            <p id="uploadText">JPG, PNG, WEBP — face morphing analysis</p>
+            <p class="upload-hint">Drop the file here, or <span>click to browse</span></p>
+          </div>
+        </div>
+
+        <input type="file" id="fileInput">
+
+        <div class="preview" id="preview">
+          <div class="file-name" id="fileName"></div>
+
+          <div class="preview-frame" id="visualFrame">
+            <img id="imagePreview" alt="preview">
+            <video id="videoPreview" controls></video>
+            <div class="scan-line" id="scanLine"></div>
+            <div class="reticle" id="reticle">
+              <span class="corner tl"></span>
+              <span class="corner tr"></span>
+              <span class="corner bl"></span>
+              <span class="corner br"></span>
+            </div>
+            <div class="filmstrip top"></div>
+            <div class="filmstrip bottom"></div>
+          </div>
+
+          <div class="audio-wrap" id="audioPreview">
+            <audio id="audioPlayer" controls></audio>
+            <div class="spectrogram" id="spectrogram"></div>
+          </div>
+        </div>
+
+        <div class="actions" id="fileActions">
+          <button class="btn danger" id="removeBtn" type="button">Remove</button>
+          <button class="btn primary" id="analyzeBtn" type="button" disabled>Analyze exhibit</button>
+        </div>
+
+        <div class="loading" id="loading">
+          <div class="loading-bars"><span></span><span></span><span></span><span></span><span></span></div>
+          <p id="loadingText">Running neural analysis…</p>
+        </div>
+
+        <div class="error" id="error"></div>
+
+        <div class="result" id="result">
+          <div class="stamp-zone">
+            <div class="stamp" id="stampEl"><span id="stampWord">—</span></div>
+            <div class="verdict-meta">
+              <span class="verdict-pipeline" id="pipeline">—</span>
+              <span class="verdict-label" id="verdict">—</span>
+            </div>
+          </div>
+
+          <div class="meter">
+            <div class="meter-head">
+              <span>Confidence</span>
+              <b id="confidence">—</b>
+            </div>
+            <div class="meter-track"><div class="meter-fill" id="meterFill"></div></div>
+          </div>
+
+          <div class="stats">
+            <div class="stat"><span>Raw score</span><b id="rawScore">—</b></div>
+            <div class="stat"><span>Model</span><b id="modelInfo">—</b></div>
+            <div class="stat"><span>Threshold</span><b id="thresholdInfo">0.50</b></div>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="footer">AuthenticAI · Local inference · Not legal evidence</footer>
+</div>
+
+<script>
+// ============================================================
+// INTRO SEQUENCE — biometric seal scan → console decrypt readout →
+// the page's own outline drawn from its real layout → merges into it
+// ============================================================
+(function () {
+  const overlay = document.getElementById("introOverlay");
+  const lock = document.getElementById("introLock");
+  const lockPercent = document.getElementById("lockPercent");
+  const terminal = document.getElementById("introTerminal");
+  const typeEl = document.getElementById("introTypeText");
+  const meterFill = document.getElementById("termMeterFill");
+  const blueprint = document.getElementById("introBlueprint");
+
+  const wait = ms => new Promise(r => setTimeout(r, ms));
+  const NS = "http://www.w3.org/2000/svg";
+
+  function reveal() {
+    document.body.classList.add("revealed");
+    overlay.classList.add("intro-hidden");
+    blueprint.classList.add("intro-hidden");
+  }
+
+  let done = false;
+  function finishNow() {
+    if (done) return;
+    done = true;
+    reveal();
+  }
+  overlay.addEventListener("click", finishNow);
+
+  const SEEN_KEY = "authenticai-intro-seen";
+  let alreadySeen = false;
+  try { alreadySeen = sessionStorage.getItem(SEEN_KEY) === "1"; } catch (e) { /* storage unavailable */ }
+
+  if (window.matchMedia("(prefers-reduced-motion: reduce)").matches || alreadySeen) {
+    finishNow();
+    return;
+  }
+  try { sessionStorage.setItem(SEEN_KEY, "1"); } catch (e) { /* storage unavailable */ }
+
+  // ---- stage 1: biometric seal scan, 0 → 100% ----
+  function animateScan(duration) {
+    return new Promise(resolve => {
+      const start = performance.now();
+      function frame(now) {
+        if (done) return resolve();
+        const t = Math.min(1, (now - start) / duration);
+        const pct = Math.floor(t * 100);
+        lockPercent.textContent = `SCANNING SEAL — ${String(pct).padStart(3, "0")}%`;
+        if (t < 1) requestAnimationFrame(frame);
+        else { lockPercent.textContent = "SEAL VERIFIED — 100%"; resolve(); }
+      }
+      requestAnimationFrame(frame);
+    });
+  }
+
+  // ---- stage 2: decrypt-style scramble typing ----
+  const SCRAMBLE_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789#%&/\\<>*";
+  function scrambleLine(el, buffer, line, stepMs) {
+    return new Promise(resolve => {
+      const len = line.length;
+      let frame = 0;
+      const totalFrames = len + 8;
+      const timer = setInterval(() => {
+        if (done) { clearInterval(timer); return resolve(); }
+        const settled = Math.max(0, frame - 4);
+        let out = "";
+        for (let i = 0; i < len; i++) {
+          if (i < settled || line[i] === " ") out += line[i];
+          else out += SCRAMBLE_CHARS[(Math.random() * SCRAMBLE_CHARS.length) | 0];
+        }
+        el.textContent = buffer + out;
+        frame++;
+        if (frame > totalFrames) {
+          clearInterval(timer);
+          el.textContent = buffer + line;
+          resolve();
+        }
+      }, stepMs);
+    });
+  }
+  async function typeLinesScramble(el, lines, stepMs, lineGapMs) {
+    let buffer = "";
+    for (const line of lines) {
+      if (done) return;
+      await scrambleLine(el, buffer, line, stepMs);
+      buffer += line + "\n";
+      el.textContent = buffer;
+      await wait(lineGapMs);
+    }
+  }
+
+  const briefing = [
+    "> ACCESSING SECURE ARCHIVE\u2026",
+    "> CLEARANCE VERIFIED",
+    "> DECRYPTING EXHIBIT INDEX\u2026",
+    "> LOADING FORENSICS UNIT_"
+  ];
+
+  // ---- stage 3: trace the REAL page's own layout into wireframe strokes ----
+  function buildBlueprint() {
+    const W = window.innerWidth, H = window.innerHeight;
+    blueprint.setAttribute("viewBox", `0 0 ${W} ${H}`);
+    blueprint.innerHTML = "";
+    let d = 0;
+    const STEP = 0.045;
+    const nextDelay = () => { const v = d; d += STEP; return v.toFixed(3) + "s"; };
+
+    function rectOf(el) { return el.getBoundingClientRect(); }
+
+    function addRect(x, y, w, h, { rx, fill } = {}) {
+      if (w <= 0 || h <= 0) return;
+      if (fill) {
+        const f = document.createElementNS(NS, "rect");
+        f.setAttribute("x", x); f.setAttribute("y", y);
+        f.setAttribute("width", w); f.setAttribute("height", h);
+        if (rx) f.setAttribute("rx", rx);
+        f.setAttribute("class", "bp-fill");
+        blueprint.appendChild(f);
+      }
+      const r = document.createElementNS(NS, "rect");
+      r.setAttribute("x", x); r.setAttribute("y", y);
+      r.setAttribute("width", w); r.setAttribute("height", h);
+      if (rx) r.setAttribute("rx", rx);
+      r.setAttribute("pathLength", "1");
+      r.style.animationDelay = nextDelay();
+      blueprint.appendChild(r);
+    }
+
+    function addLine(x1, y1, x2, y2) {
+      if (x2 - x1 <= 0) return;
+      const p = document.createElementNS(NS, "path");
+      p.setAttribute("d", `M ${x1} ${y1} H ${x2}`);
+      p.setAttribute("pathLength", "1");
+      p.style.animationDelay = nextDelay();
+      blueprint.appendChild(p);
+    }
+
+    function addLabel(x, y, text) {
+      const t = document.createElementNS(NS, "text");
+      t.setAttribute("x", x); t.setAttribute("y", y);
+      t.setAttribute("class", "bp-label");
+      t.textContent = text;
+      blueprint.appendChild(t);
+    }
+
+    function traceTextLines(el, maxLines) {
+      if (!el) return;
+      const rects = Array.from(el.getClientRects()).slice(0, maxLines || 99);
+      rects.forEach(r => addLine(r.left, r.top + r.height * 0.72, r.left + r.width, r.top + r.height * 0.72));
+    }
+
+    const header = document.querySelector(".site-header");
+    if (header) { const r = rectOf(header); addRect(r.left, r.top, r.width, r.height, { fill: true }); addLabel(r.left + 12, r.top + 16, "01 · header"); }
+    const brandMark = document.querySelector(".brand-mark");
+    if (brandMark) { const r = rectOf(brandMark); addRect(r.left, r.top, r.width, r.height, { rx: 4 }); }
+    traceTextLines(document.querySelector(".brand-title"));
+    traceTextLines(document.querySelector(".brand-sub"));
+    document.querySelectorAll(".case-label, .case-number").forEach(el => traceTextLines(el));
+
+    const eyebrow = document.querySelector(".eyebrow");
+    if (eyebrow) { const r = rectOf(eyebrow); addLabel(r.left, r.top - 10, "02 · headline"); }
+    traceTextLines(eyebrow);
+    traceTextLines(document.querySelector(".hero h1"));
+    traceTextLines(document.querySelector(".hero-copy"), 3);
+
+    const card = document.querySelector(".file-card");
+    if (card) { const r = rectOf(card); addRect(r.left, r.top, r.width, r.height, { rx: 14, fill: true }); addLabel(r.left + 12, r.top - 10, "03 · exhibit file"); }
+    document.querySelectorAll(".tab").forEach(tab => { const r = rectOf(tab); addRect(r.left, r.top, r.width, r.height); });
+    const uploadEl = document.querySelector(".upload");
+    if (uploadEl) { const r = rectOf(uploadEl); addRect(r.left, r.top, r.width, r.height, { rx: 12 }); addLabel(r.left + 14, r.top + 20, "04 · dropzone"); }
+  }
+
+  async function play() {
+    if (document.fonts && document.fonts.ready) { try { await document.fonts.ready; } catch (e) {} }
+
+    await wait(300);
+    if (done) return;
+    lock.classList.add("scanning");
+    await animateScan(900);
+    if (done) return;
+    lock.classList.remove("scanning");
+    lock.classList.add("glitch");
+    await wait(140);
+    if (done) return;
+    lock.classList.remove("glitch");
+    lock.classList.add("unlocking");
+    await wait(550);
+    if (done) return;
+
+    lock.classList.add("stage-out");
+    terminal.classList.add("stage-in");
+    await wait(200);
+    await typeLinesScramble(typeEl, briefing, 22, 220);
+    if (done) return;
+    meterFill.style.width = "100%";
+    await wait(650);
+    terminal.classList.add("stage-out");
+    await wait(300);
+    if (done) return;
+
+    buildBlueprint();
+    blueprint.classList.add("stage-in");
+    await wait(1750);
+    if (done) return;
+
+    // merge: the traced outline dissolves while the real page fades up
+    // underneath in the exact same positions it was just drawn in.
+    document.body.classList.add("revealed");
+    overlay.classList.add("merging");
+    blueprint.classList.add("stage-out");
+    await wait(900);
+    finishNow();
+  }
+
+  play();
+})();
+
+const state = { type: "face_morph", file: null };
+</script>
+<script>
+const tabs = document.querySelectorAll(".tab");
+const uploadBox = document.getElementById("uploadBox");
+const fileInput = document.getElementById("fileInput");
+const preview = document.getElementById("preview");
+const imagePreview = document.getElementById("imagePreview");
+const videoPreview = document.getElementById("videoPreview");
+const audioPreview = document.getElementById("audioPreview");
+const audioPlayer = document.getElementById("audioPlayer");
+const fileName = document.getElementById("fileName");
+const analyzeBtn = document.getElementById("analyzeBtn");
+const modeText = document.getElementById("modeText");
+const fileActions = document.getElementById("fileActions");
+const DEFAULT_TTA = false;
+const DEFAULT_FACE_CROP = true;
+const DEFAULT_PREPROCESS = false;
+const loading = document.getElementById("loading");
+const loadingText = document.getElementById("loadingText");
+const errorBox = document.getElementById("error");
+const result = document.getElementById("result");
+const visualFrame = document.getElementById("visualFrame");
+const spectrogram = document.getElementById("spectrogram");
+
+const uploadConfig = {
+  face_morph: { title: "Submit an image", text: "JPG, PNG, WEBP — face morphing analysis", accept: "image/*", icon: "⬡" },
+  ai_generated: { title: "Submit an image", text: "JPG, PNG, WEBP — AI-generated image detection", accept: "image/*", icon: "✦" },
+  audio: { title: "Submit an audio file", text: "WAV, MP3, M4A, FLAC, OGG — audio deepfake analysis", accept: "audio/*", icon: "♫" },
+  video: { title: "Submit a video", text: "MP4, AVI, MOV, MKV, WEBM — frame-by-frame analysis", accept: "video/*", icon: "▶" }
+};
+
+const loadingMessagesByType = {
+  face_morph: ["Locating facial landmarks…", "Checking blend seams…", "Measuring texture consistency…", "Compiling verdict…"],
+  ai_generated: ["Running the 5-fold ensemble…", "Checking generator fingerprints…", "Measuring noise statistics…", "Compiling verdict…"],
+  audio: ["Extracting MFCC features…", "Reading the spectrogram…", "Checking vocal-tract consistency…", "Compiling verdict…"],
+  video: ["Sampling frames…", "Running face-morphing pass per frame…", "Aggregating frame verdicts…", "Compiling verdict…"]
+};
+let loadingTimer = null;
+
+// ---- spectrogram bars (audio) ----
+const SPEC_BARS = 56;
+for (let i = 0; i < SPEC_BARS; i++) {
+  const bar = document.createElement("span");
+  spectrogram.appendChild(bar);
+}
+const specBars = spectrogram.querySelectorAll("span");
+let specTimer = null;
+
+function startSpectrogram() {
+  spectrogram.classList.add("active");
+  specTimer = setInterval(() => {
+    specBars.forEach((bar, i) => {
+      const center = SPEC_BARS / 2;
+      const distance = Math.abs(i - center) / center;
+      const envelope = 1 - distance * 0.7;
+      const h = Math.max(6, Math.random() * 100 * envelope);
+      bar.style.height = h + "%";
+    });
+  }, 90);
+}
+function stopSpectrogram(freeze) {
+  clearInterval(specTimer);
+  specTimer = null;
+  if (!freeze) {
+    spectrogram.classList.remove("active");
+    specBars.forEach(bar => (bar.style.height = "6%"));
+  }
+}
+
+function setError(message) {
+  errorBox.textContent = message || "";
+  errorBox.classList.toggle("show", !!message);
+}
+
+function clearResult() {
+  result.classList.remove("show", "fake", "real");
+  document.getElementById("meterFill").style.width = "0%";
+}
+
+function generateCaseNumber() {
+  const y = new Date().getFullYear();
+  const rand = Math.floor(1000 + Math.random() * 9000);
+  return `AX-${y}-${rand}`;
+}
+document.getElementById("caseNumber").textContent = generateCaseNumber();
+
+function setMode(type) {
+  state.type = type;
+  state.file = null;
+  fileInput.value = "";
+  clearResult();
+  setError("");
+  stopSpectrogram(false);
+
+  tabs.forEach(t => t.classList.toggle("active", t.dataset.type === type));
+
+  const cfg = uploadConfig[type];
+  modeText.textContent =
+    type === "face_morph" ? "FACE MORPHING" :
+    type === "ai_generated" ? "AI GENERATED" :
+    type === "audio" ? "AUDIO DEEPFAKE" : "VIDEO";
+
+  document.getElementById("uploadTitle").textContent = cfg.title;
+  document.getElementById("uploadText").textContent = cfg.text;
+  document.getElementById("uploadIcon").textContent = cfg.icon;
+  fileInput.accept = cfg.accept;
+
+  imagePreview.style.display = "none";
+  videoPreview.style.display = "none";
+  visualFrame.style.display = "none";
+  audioPreview.style.display = "none";
+  preview.classList.remove("show");
+  analyzeBtn.disabled = true;
+}
+
+tabs.forEach(tab => tab.addEventListener("click", () => setMode(tab.dataset.type)));
+
+uploadBox.addEventListener("click", () => fileInput.click());
+uploadBox.addEventListener("keydown", e => {
+  if (e.key === "Enter" || e.key === " ") { e.preventDefault(); fileInput.click(); }
+});
+
+["dragenter", "dragover"].forEach(evt => {
+  uploadBox.addEventListener(evt, e => { e.preventDefault(); uploadBox.classList.add("drag"); });
+});
+["dragleave", "drop"].forEach(evt => {
+  uploadBox.addEventListener(evt, e => { e.preventDefault(); uploadBox.classList.remove("drag"); });
+});
+uploadBox.addEventListener("drop", e => {
+  const file = e.dataTransfer.files[0];
+  if (file) selectFile(file);
+});
+
+fileInput.addEventListener("change", e => {
+  if (e.target.files[0]) selectFile(e.target.files[0]);
+});
+
+function selectFile(file) {
+  state.file = file;
+  fileName.textContent = file.name;
+  clearResult();
+  setError("");
+  stopSpectrogram(false);
+
+  imagePreview.style.display = "none";
+  videoPreview.style.display = "none";
+  visualFrame.style.display = "none";
+  audioPreview.style.display = "none";
+
+  const url = URL.createObjectURL(file);
+
+  if (state.type === "audio") {
+    audioPreview.style.display = "block";
+    audioPlayer.src = url;
+  } else if (state.type === "video") {
+    visualFrame.style.display = "block";
+    videoPreview.style.display = "block";
+    videoPreview.src = url;
+  } else {
+    visualFrame.style.display = "block";
+    imagePreview.style.display = "block";
+    imagePreview.src = url;
+  }
+
+  preview.classList.add("show");
+  analyzeBtn.disabled = false;
+}
+
+document.getElementById("removeBtn").addEventListener("click", () => {
+  state.file = null;
+  fileInput.value = "";
+  preview.classList.remove("show");
+  analyzeBtn.disabled = true;
+  clearResult();
+  setError("");
+  stopSpectrogram(false);
+});
+
+document.getElementById("analyzeBtn").addEventListener("click", () => {
+  if (!state.file) return;
+  sendFile(state.file, state.type);
+});
+
+function startLoadingCycle(type) {
+  const messages = loadingMessagesByType[type] || loadingMessagesByType.face_morph;
+  let i = 0;
+  loadingText.textContent = messages[0];
+  loadingTimer = setInterval(() => {
+    i = (i + 1) % messages.length;
+    loadingText.textContent = messages[i];
+  }, 1100);
+}
+function stopLoadingCycle() {
+  clearInterval(loadingTimer);
+  loadingTimer = null;
+}
+
+async function sendFile(file, type) {
+  const formData = new FormData();
+  formData.append("file", file);
+  formData.append("type", type);
+  formData.append("threshold", "0.5");
+  formData.append("tta", DEFAULT_TTA);
+  formData.append("face_crop", DEFAULT_FACE_CROP);
+  formData.append("preprocess", DEFAULT_PREPROCESS);
+
+  loading.classList.add("show");
+  startLoadingCycle(type);
+  analyzeBtn.disabled = true;
+  clearResult();
+  setError("");
+
+  if (type === "audio") {
+    startSpectrogram();
+  } else {
+    visualFrame.classList.add("analyzing");
+  }
+
+  try {
+    const response = await fetch("/api/predict", { method: "POST", body: formData });
+    const data = await response.json();
+
+    if (!response.ok || !data.success) {
+      throw new Error(data.error || "Prediction failed.");
+    }
+
+    showResult(data);
+  } catch (err) {
+    setError(err.message);
+  } finally {
+    loading.classList.remove("show");
+    stopLoadingCycle();
+    visualFrame.classList.remove("analyzing");
+    if (type === "audio") stopSpectrogram(true);
+    analyzeBtn.disabled = !state.file;
+  }
+}
+
+function showResult(data) {
+  const isFake = data.prediction === "Fake";
+
+  result.classList.remove("fake", "real");
+  result.classList.add("show", isFake ? "fake" : "real");
+
+  document.getElementById("stampWord").textContent = isFake ? (data.label || "MANIPULATED") : "AUTHENTIC";
+  document.getElementById("verdict").textContent = data.label || (isFake ? "Manipulated" : "Authentic");
+  document.getElementById("pipeline").textContent = data.pipeline || "Analysis";
+
+  document.getElementById("confidence").textContent = Number(data.confidence || 0).toFixed(2) + "%";
+  document.getElementById("rawScore").textContent = Number(data.raw_score || 0).toFixed(4);
+  document.getElementById("thresholdInfo").textContent = Number(data.threshold || 0.5).toFixed(2);
+
+  let modelInfo = "Specialist model";
+  if (data.pipeline === "AI-Generated Image") {
+    modelInfo = "EfficientNet-B1 × " + (data.ensemble_size || 0);
+  } else if (data.pipeline === "Face Morphing") {
+    modelInfo = "EffNet-B0 + MesoNet";
+  } else if (data.pipeline === "Audio Deepfake") {
+    modelInfo = "AudioDeepfakeModel";
+  } else if ((data.pipeline || "").includes("Video")) {
+    modelInfo = (data.frames_analyzed || 0) + " frames";
+  }
+  document.getElementById("modelInfo").textContent = modelInfo;
+
+  requestAnimationFrame(() => {
+    document.getElementById("meterFill").style.width =
+      Math.min(100, Math.max(0, Number(data.confidence || 0))) + "%";
+  });
+}
+
+setMode("face_morph");
+</script>
+</body>
+</html>
