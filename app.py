@@ -1,9 +1,9 @@
 import os
 import sys
 import io
+import json
 import uuid
 import logging
-import traceback
 from pathlib import Path
 
 import cv2
@@ -18,19 +18,20 @@ from flask import Flask, render_template, request, jsonify
 from flask_cors import CORS
 from werkzeug.utils import secure_filename
 
-from PIL import Image, ImageEnhance, ImageOps, ImageFile, UnidentifiedImageError
+from PIL import Image, ImageEnhance, ImageOps
 from torchvision import transforms, models
 
 # ============================================================
 # AUTHENTICAI - COMBINED DETECTOR
 #
 # Pipelines:
-#   1. Face Morphing  -> EfficientNet-B0 + MesoNet fusion
+#   1. Face Morphing  -> retrained EfficientNet-B0 + Meso-4 + fusion
+#                        head (5-fold ensemble of fold*_bundle.pth)
 #   2. AI Generated   -> EfficientNet-B1 5-fold ensemble
-#   3. Audio Deepfake  -> AudioDeepfakeModel
+#   3. Audio Deepfake -> AudioDeepfakeModel
 #   4. Video          -> per-frame fusion of (1) + (2), weighted
-#                         toward the AI-generated ensemble, then
-#                         soft-voted across frames
+#                        toward the AI-generated ensemble, then
+#                        soft-voted across frames
 #   5. Camera         -> image pipeline selected in the UI
 # ============================================================
 
@@ -58,91 +59,45 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 logger.info("Using device: %s", DEVICE)
 
 # ============================================================
-# MODEL PATHS
+# MODEL PATHS / SETTINGS
 # ============================================================
 
-FACE_EFF_PATH = MODELS_DIR / "best_model.pth"
-FACE_MESO_PATH = MODELS_DIR / "mesonet_best.pth"
-FACE_FUSION_PATH = MODELS_DIR / "fusion_model.pth"
+# ---- Face morphing (retrained, from 03_retrain_meso_fusion.py) ----
+# Put fold0_bundle.pth ... fold4_bundle.pth (and best_model.json)
+# from DATA/models/cv_v2 / DATA/results_v2 into this folder.
+FACE_BUNDLE_DIR = MODELS_DIR / "face_cv_v2"
+FACE_BEST_JSON = FACE_BUNDLE_DIR / "best_model.json"
 
+# Which output of the bundle decides the verdict:
+#   "auto"   -> read best_variant from best_model.json (fallback: fusion)
+#   "fusion" -> fusion head
+#   "eff"    -> EfficientNet-B0 only
+#   "meso"   -> Meso-4 only
+#   "avg"    -> mean of eff and meso
+FACE_VARIANT = "auto"
+FACE_VARIANTS = ("eff", "meso", "avg", "fusion")
+
+# The models were trained on cropped face frames, so face cropping is
+# forced ON for the face-morphing model regardless of the UI checkbox.
+FACE_FORCE_CROP = True
+
+FACE_SIZE = 224
+FACE_MEAN = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1)
+FACE_STD = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1)
+
+# ---- Audio ----
 AUDIO_PATH = MODELS_DIR / "best_audio_deepfake_model.pth"
 
-# The file best_model-v3.pt is kept in models/, but it is NOT used
-# by the AI-generated pipeline below. The AI-generated pipeline
-# supplied by the user is the 5-fold EfficientNet-B1 ensemble.
+# ---- AI-generated image ensemble ----
+# best_model-v3.pt stays in models/ but is NOT used here.
 AI_MODEL_NAME = "efficientnet_b1"
 AI_IMAGE_SIZE = 240
 AI_NUM_FOLDS = 5
 AI_DEFAULT_CLASSES = ["Real", "Fake"]
 
-# ---- video fusion weights -----------------------------------
-# Per frame, the video pipeline blends the AI-generated ensemble's
-# fake-probability with the face-morphing fusion model's fake-
-# probability. The AI-generated ensemble is given the majority
-# share of the vote by default. Tune these two (they should sum
-# to 1.0) to shift how much each specialist influences the verdict.
+# ---- video fusion weights (should sum to 1.0) ----
 VIDEO_AI_GENERATED_WEIGHT = 0.65
 VIDEO_FACE_MORPH_WEIGHT = 0.35
-
-# ============================================================
-# COMMON IMAGE TRANSFORM
-# ============================================================
-
-FACE_TRANSFORM = transforms.Compose([
-    transforms.Resize((224, 224)),
-    transforms.ToTensor(),
-    transforms.Normalize(
-        [0.485, 0.456, 0.406],
-        [0.229, 0.224, 0.225]
-    )
-])
-
-FACE_TTA_TRANSFORMS = [
-    transforms.Compose([
-        transforms.Resize((224, 224)),
-        transforms.ToTensor(),
-        transforms.Normalize(
-            [0.485, 0.456, 0.406],
-            [0.229, 0.224, 0.225]
-        )
-    ]),
-    transforms.Compose([
-        transforms.Resize((224, 224)),
-        transforms.RandomHorizontalFlip(p=1.0),
-        transforms.ToTensor(),
-        transforms.Normalize(
-            [0.485, 0.456, 0.406],
-            [0.229, 0.224, 0.225]
-        )
-    ]),
-    transforms.Compose([
-        transforms.Resize((256, 256)),
-        transforms.CenterCrop(224),
-        transforms.ToTensor(),
-        transforms.Normalize(
-            [0.485, 0.456, 0.406],
-            [0.229, 0.224, 0.225]
-        )
-    ]),
-    transforms.Compose([
-        transforms.Resize((224, 224)),
-        transforms.ColorJitter(brightness=0.2),
-        transforms.ToTensor(),
-        transforms.Normalize(
-            [0.485, 0.456, 0.406],
-            [0.229, 0.224, 0.225]
-        )
-    ]),
-    transforms.Compose([
-        transforms.Resize((224, 224)),
-        transforms.ColorJitter(saturation=0.2, contrast=0.15),
-        transforms.ToTensor(),
-        transforms.Normalize(
-            [0.485, 0.456, 0.406],
-            [0.229, 0.224, 0.225]
-        )
-    ]),
-]
 
 AI_TRANSFORM = transforms.Compose([
     transforms.Resize((AI_IMAGE_SIZE, AI_IMAGE_SIZE)),
@@ -156,18 +111,10 @@ AI_TRANSFORM = transforms.Compose([
 # ============================================================
 # FACE DETECTION / PREPROCESSING
 #
-# Uses OpenCV's classic Haar-cascade face detector. As of OpenCV
-# 5.0, cv2.CascadeClassifier was moved out of the core module into
-# opencv_contrib, so this requires `opencv-contrib-python` rather
-# than plain `opencv-python`:
-#
+# Needs opencv-contrib-python (not plain opencv-python) for
+# cv2.CascadeClassifier on OpenCV 5:
 #     pip uninstall opencv-python -y
 #     pip install opencv-contrib-python
-#
-# The cascade XML is bundled locally (models/haarcascade_frontal
-# face_default.xml) so this doesn't depend on cv2.data pointing to
-# the right place in whatever environment this runs in; it falls
-# back to cv2's own bundled copy if that file isn't present.
 # ============================================================
 
 BUNDLED_CASCADE_PATH = MODELS_DIR / "haarcascade_frontalface_default.xml"
@@ -190,7 +137,11 @@ def get_face_detector():
     if BUNDLED_CASCADE_PATH.exists():
         cascade_path = str(BUNDLED_CASCADE_PATH)
     else:
-        cascade_path = cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
+        try:
+            cascade_path = cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
+        except AttributeError:
+            logger.warning("No Haar cascade available. Full frames will be used.")
+            return None
 
     if not os.path.exists(cascade_path):
         logger.warning("Haar Cascade file not found. Full frames will be used.")
@@ -199,14 +150,13 @@ def get_face_detector():
     try:
         classifier = cv2.CascadeClassifier(cascade_path)
         if classifier.empty():
-            logger.warning("Haar Cascade file found but failed to load: %s", cascade_path)
+            logger.warning("Haar Cascade failed to load: %s", cascade_path)
             return None
         _face_detector = classifier
         logger.info("Haar Cascade face detector loaded from: %s", cascade_path)
     except AttributeError:
         logger.warning(
-            "cv2.CascadeClassifier is unavailable — you likely have plain "
-            "opencv-python installed instead of opencv-contrib-python. Run: "
+            "cv2.CascadeClassifier is unavailable - install opencv-contrib-python: "
             "pip uninstall opencv-python -y && pip install opencv-contrib-python"
         )
         _face_detector = None
@@ -265,6 +215,7 @@ def detect_and_crop_face(pil_image, margin=0.30):
 
 
 def normalize_image_quality(image):
+    """Optional UI 'preprocess' step. NOT used in training; leave off for best accuracy."""
     try:
         image = ImageOps.exif_transpose(image)
         image = image.convert("RGB")
@@ -299,155 +250,200 @@ def normalize_image_quality(image):
 
 # ============================================================
 # FACE MORPHING MODEL DEFINITIONS
+# These must match 02_train_cv.py / 03_retrain_meso_fusion.py exactly.
+# Label convention in training: 0 = real, 1 = fake.
 # ============================================================
 
-class MesoNet(nn.Module):
-    def __init__(self):
+class Meso4(nn.Module):
+    """Corrected Meso-4 from 03_retrain_meso_fusion.py (224 input -> 16*7*7 features)."""
+
+    def __init__(self, drop=0.3):
         super().__init__()
+        self.c1, self.b1 = nn.Conv2d(3, 8, 3, padding=1), nn.BatchNorm2d(8)
+        self.c2, self.b2 = nn.Conv2d(8, 8, 5, padding=2), nn.BatchNorm2d(8)
+        self.c3, self.b3 = nn.Conv2d(8, 16, 5, padding=2), nn.BatchNorm2d(16)
+        self.c4, self.b4 = nn.Conv2d(16, 16, 5, padding=2), nn.BatchNorm2d(16)
+        self.drop = nn.Dropout(drop)
+        self.fc1, self.fc2 = nn.Linear(16 * 7 * 7, 16), nn.Linear(16, 2)
 
-        self.conv1 = nn.Conv2d(3, 8, 3, padding=1)
-        self.bn1 = nn.BatchNorm2d(8)
-
-        self.conv2 = nn.Conv2d(8, 8, 5, padding=2)
-        self.bn2 = nn.BatchNorm2d(8)
-
-        self.conv3 = nn.Conv2d(8, 16, 5, padding=2)
-        self.bn3 = nn.BatchNorm2d(16)
-
-        self.conv4 = nn.Conv2d(16, 16, 5, padding=2)
-        self.bn4 = nn.BatchNorm2d(16)
-
-        self.pool = nn.MaxPool2d(2, 2)
-        self.dropout = nn.Dropout(0.5)
-
-        self.fc1 = nn.Linear(16 * 14 * 14, 16)
-        self.fc2 = nn.Linear(16, 2)
+    def feats(self, x):
+        lr = lambda t: F.leaky_relu(t, 0.1)
+        x = F.max_pool2d(lr(self.b1(self.c1(x))), 2)
+        x = F.max_pool2d(lr(self.b2(self.c2(x))), 2)
+        x = F.max_pool2d(lr(self.b3(self.c3(x))), 2)
+        x = F.max_pool2d(lr(self.b4(self.c4(x))), 4)
+        return lr(self.fc1(self.drop(torch.flatten(x, 1))))
 
     def forward(self, x):
-        x = self.pool(torch.relu(self.bn1(self.conv1(x))))
-        x = self.pool(torch.relu(self.bn2(self.conv2(x))))
-        x = self.pool(torch.relu(self.bn3(self.conv3(x))))
-        x = self.pool(torch.relu(self.bn4(self.conv4(x))))
-
-        x = x.view(x.size(0), -1)
-        x = self.dropout(torch.relu(self.fc1(x)))
-
-        return self.fc2(x)
+        return self.fc2(self.drop(self.feats(x)))
 
 
-class FusionModel(nn.Module):
-    """
-    Face-morphing vision fusion from the supplied application:
-    EfficientNet-B0 + MesoNet.
-    """
+class FusionHead(nn.Module):
+    """MLP on standardised [EfficientNet 1280 | Meso-4 16] features."""
 
-    def __init__(self, eff, meso):
+    def __init__(self, mu, sd):
         super().__init__()
-
-        self.eff = eff
-        self.meso = meso
-
-        self.eff.classifier = nn.Identity()
-        self.meso.fc2 = nn.Identity()
-
-        self.fc = nn.Sequential(
-            nn.Linear(1280 + 16, 128),
+        self.register_buffer("mu", mu)
+        self.register_buffer("sd", sd)
+        self.net = nn.Sequential(
+            nn.Linear(1296, 128),
             nn.ReLU(),
             nn.Dropout(0.5),
             nn.Linear(128, 2)
         )
 
-    def forward(self, x):
-        f1 = self.eff(x)
-        f2 = self.meso(x)
+    def forward(self, f):
+        return self.net((f - self.mu) / self.sd)
 
-        return self.fc(torch.cat((f1, f2), dim=1))
+
+def build_face_eff():
+    m = models.efficientnet_b0(weights=None)
+    m.classifier[1] = nn.Linear(1280, 2)
+    return m
+
+
+class FaceBundle:
+    """One fold: EfficientNet-B0 + Meso-4 + fusion head, loaded from fold*_bundle.pth."""
+
+    def __init__(self, path: Path):
+        ck = torch.load(path, map_location=DEVICE, weights_only=False)
+
+        self.name = path.name
+
+        self.eff = build_face_eff()
+        self.eff.load_state_dict(ck["eff"])
+        self.eff.to(DEVICE).eval()
+
+        self.meso = Meso4()
+        self.meso.load_state_dict(ck["meso"])
+        self.meso.to(DEVICE).eval()
+
+        self.head = FusionHead(torch.zeros(1296), torch.ones(1296))
+        self.head.load_state_dict(ck["head"])
+        self.head.to(DEVICE).eval()
+
+    @torch.inference_mode()
+    def fake_probs(self, x):
+        """Returns P(fake) for each variant."""
+        fe = torch.flatten(self.eff.avgpool(self.eff.features(x)), 1)
+        le = self.eff.classifier(fe)
+
+        fm = self.meso.feats(x)
+        lm = self.meso.fc2(fm)
+
+        lf = self.head(torch.cat([fe, fm], dim=1))
+
+        pe = float(torch.softmax(le, 1)[0, 1].cpu())
+        pm = float(torch.softmax(lm, 1)[0, 1].cpu())
+        pf = float(torch.softmax(lf, 1)[0, 1].cpu())
+
+        return {
+            "eff": pe,
+            "meso": pm,
+            "avg": (pe + pm) / 2.0,
+            "fusion": pf
+        }
 
 
 # ============================================================
 # LOAD FACE MORPHING + AUDIO MODELS
 # ============================================================
 
-fusion_model = None
+face_bundles = []
+face_variant = "fusion"
 audio_model = None
 
 
-def load_face_and_audio_models():
-    global fusion_model, audio_model
+def resolve_face_variant():
+    if FACE_VARIANT in FACE_VARIANTS:
+        return FACE_VARIANT
 
-    # ----- Face morphing vision model -----
-    required = [FACE_EFF_PATH, FACE_MESO_PATH, FACE_FUSION_PATH]
-
-    for path in required:
-        if not path.exists():
-            raise FileNotFoundError(f"Missing face-morphing model: {path}")
-
-    eff_model = models.efficientnet_b0(weights=None)
-    eff_model.classifier[1] = nn.Linear(
-        eff_model.classifier[1].in_features,
-        2
-    )
-
-    eff_state = torch.load(
-        FACE_EFF_PATH,
-        map_location=DEVICE,
-        weights_only=False
-    )
-    eff_model.load_state_dict(eff_state)
-    eff_model.to(DEVICE).eval()
-
-    meso_model = MesoNet()
-
-    meso_state = torch.load(
-        FACE_MESO_PATH,
-        map_location=DEVICE,
-        weights_only=False
-    )
-    meso_model.load_state_dict(meso_state)
-    meso_model.to(DEVICE).eval()
-
-    fusion_model = FusionModel(eff_model, meso_model).to(DEVICE)
-
-    fusion_state = torch.load(
-        FACE_FUSION_PATH,
-        map_location=DEVICE,
-        weights_only=False
-    )
-    fusion_model.load_state_dict(fusion_state)
-    fusion_model.eval()
-
-    logger.info("Face morphing fusion model loaded.")
-
-    # ----- Audio model -----
-    if AUDIO_PATH.exists():
+    if FACE_BEST_JSON.exists():
         try:
-            audio_model = AudioDeepfakeModel()
-
-            checkpoint = torch.load(
-                AUDIO_PATH,
-                map_location=DEVICE,
-                weights_only=False
-            )
-
-            try:
-                audio_model.load_state_dict(checkpoint, strict=True)
-            except RuntimeError:
-                audio_model.load_state_dict(checkpoint, strict=False)
-
-            audio_model.to(DEVICE).eval()
-
-            logger.info("Audio deepfake model loaded.")
-
+            with open(FACE_BEST_JSON, "r", encoding="utf-8") as f:
+                best = json.load(f).get("best_variant")
+            if best in FACE_VARIANTS:
+                return best
+            logger.warning("Unknown best_variant '%s' in %s", best, FACE_BEST_JSON)
         except Exception as exc:
-            audio_model = None
-            logger.exception("Audio model failed to load: %s", exc)
-    else:
+            logger.warning("Could not read %s: %s", FACE_BEST_JSON, exc)
+
+    return "fusion"
+
+
+def load_face_models():
+    global face_bundles, face_variant
+
+    face_bundles = []
+
+    if not FACE_BUNDLE_DIR.exists():
+        raise FileNotFoundError(
+            f"Face model folder not found: {FACE_BUNDLE_DIR}. "
+            f"Copy fold*_bundle.pth from DATA/models/cv_v2 into it."
+        )
+
+    paths = sorted(FACE_BUNDLE_DIR.glob("fold*_bundle.pth"))
+
+    if not paths:
+        fallback = FACE_BUNDLE_DIR / "best_model_bundle.pth"
+        if fallback.exists():
+            paths = [fallback]
+            logger.warning("No fold bundles found; using single best_model_bundle.pth.")
+
+    if not paths:
+        raise FileNotFoundError(
+            f"No fold*_bundle.pth or best_model_bundle.pth in {FACE_BUNDLE_DIR}"
+        )
+
+    for path in paths:
+        try:
+            face_bundles.append(FaceBundle(path))
+            logger.info("Face bundle loaded: %s", path.name)
+        except Exception as exc:
+            logger.exception("Face bundle %s failed to load: %s", path.name, exc)
+
+    if not face_bundles:
+        raise RuntimeError("No face-morphing bundles could be loaded.")
+
+    face_variant = resolve_face_variant()
+    logger.info(
+        "Face morphing ready: %d bundle(s), decision variant = %s",
+        len(face_bundles),
+        face_variant
+    )
+
+
+def load_audio_model():
+    global audio_model
+
+    if not AUDIO_PATH.exists():
         logger.warning("Audio model file not found: %s", AUDIO_PATH)
+        return
+
+    try:
+        audio_model = AudioDeepfakeModel()
+
+        checkpoint = torch.load(
+            AUDIO_PATH,
+            map_location=DEVICE,
+            weights_only=False
+        )
+
+        try:
+            audio_model.load_state_dict(checkpoint, strict=True)
+        except RuntimeError:
+            audio_model.load_state_dict(checkpoint, strict=False)
+
+        audio_model.to(DEVICE).eval()
+        logger.info("Audio deepfake model loaded.")
+
+    except Exception as exc:
+        audio_model = None
+        logger.exception("Audio model failed to load: %s", exc)
 
 
 # ============================================================
-# AI-GENERATED IMAGE MODEL
-# Exact 5-fold EfficientNet-B1 approach supplied by the user.
+# AI-GENERATED IMAGE MODEL (unchanged)
 # ============================================================
 
 ai_ensemble_models = []
@@ -516,18 +512,10 @@ def load_ai_checkpoint(model_path: Path):
     )
 
     if missing:
-        logger.warning(
-            "Missing keys in %s: %s",
-            model_path.name,
-            missing
-        )
+        logger.warning("Missing keys in %s: %s", model_path.name, missing)
 
     if unexpected:
-        logger.warning(
-            "Unexpected keys in %s: %s",
-            model_path.name,
-            unexpected
-        )
+        logger.warning("Unexpected keys in %s: %s", model_path.name, unexpected)
 
     fold_model.to(DEVICE).eval()
 
@@ -555,11 +543,7 @@ def load_ai_models():
         model_path = AI_CV_DIR / f"fold_{fold}" / "best_model.pth"
 
         if not model_path.exists():
-            logger.warning(
-                "AI fold %d missing: %s",
-                fold,
-                model_path
-            )
+            logger.warning("AI fold %d missing: %s", fold, model_path)
             continue
 
         try:
@@ -574,11 +558,7 @@ def load_ai_models():
             logger.info("AI-generated fold %d loaded.", fold)
 
         except Exception as exc:
-            logger.exception(
-                "AI-generated fold %d failed: %s",
-                fold,
-                exc
-            )
+            logger.exception("AI-generated fold %d failed: %s", fold, exc)
 
     if not ai_ensemble_models:
         raise RuntimeError(
@@ -589,17 +569,8 @@ def load_ai_models():
 
     lower_names = [name.lower() for name in ai_class_names]
 
-    ai_fake_index = (
-        lower_names.index("fake")
-        if "fake" in lower_names
-        else 1
-    )
-
-    ai_real_index = (
-        lower_names.index("real")
-        if "real" in lower_names
-        else 0
-    )
+    ai_fake_index = lower_names.index("fake") if "fake" in lower_names else 1
+    ai_real_index = lower_names.index("real") if "real" in lower_names else 0
 
     logger.info(
         "AI-generated ensemble loaded: folds=%s classes=%s",
@@ -609,13 +580,30 @@ def load_ai_models():
 
 
 # Load all models when Flask starts.
-load_face_and_audio_models()
+load_face_models()
+load_audio_model()
 load_ai_models()
 
 
 # ============================================================
 # FACE MORPHING PREDICTION
 # ============================================================
+
+def face_to_tensor(pil_image, flip=False):
+    """Same preprocessing as training: RGB, INTER_AREA resize to 224, ImageNet norm."""
+    arr = np.array(pil_image.convert("RGB"))
+
+    if arr.shape[:2] != (FACE_SIZE, FACE_SIZE):
+        arr = cv2.resize(arr, (FACE_SIZE, FACE_SIZE), interpolation=cv2.INTER_AREA)
+
+    if flip:
+        arr = arr[:, ::-1]
+
+    t = torch.from_numpy(np.ascontiguousarray(arr)).permute(2, 0, 1).float().div_(255.0)
+    t = (t - FACE_MEAN) / FACE_STD
+
+    return t.unsqueeze(0).to(DEVICE)
+
 
 def predict_face_morphing(
     image,
@@ -624,7 +612,12 @@ def predict_face_morphing(
     use_face_crop=False,
     use_preprocess=False
 ):
-    if fusion_model is None:
+    """
+    raw_score / fake_probability = P(fake), averaged over the fold
+    ensemble (and over original + horizontal flip when TTA is on).
+    Verdict: Fake when P(fake) >= threshold.
+    """
+    if not face_bundles:
         raise RuntimeError("Face morphing model is not loaded.")
 
     image = image.convert("RGB")
@@ -632,44 +625,49 @@ def predict_face_morphing(
     if use_preprocess:
         image = normalize_image_quality(image)
 
-    if use_face_crop:
+    crop_applied = bool(use_face_crop or FACE_FORCE_CROP)
+    if crop_applied:
         image = detect_and_crop_face(image)
 
-    aug_list = FACE_TTA_TRANSFORMS if use_tta else [FACE_TRANSFORM]
+    tensors = [face_to_tensor(image)]
+    if use_tta:
+        tensors.append(face_to_tensor(image, flip=True))
 
-    scores = []
+    per_variant = {v: [] for v in FACE_VARIANTS}
 
-    with torch.inference_mode():
-        for aug in aug_list:
-            tensor = aug(image).unsqueeze(0).to(DEVICE)
+    for bundle in face_bundles:
+        for tensor in tensors:
+            probs = bundle.fake_probs(tensor)
+            for v in FACE_VARIANTS:
+                per_variant[v].append(probs[v])
 
-            output = fusion_model(tensor)
-            probabilities = torch.softmax(output, dim=1)
+    variant_probs = {v: float(np.mean(per_variant[v])) for v in FACE_VARIANTS}
 
-            # Preserves the supplied face-morphing app's score convention:
-            # class index 1 is used as raw_score.
-            scores.append(float(probabilities[0][1].cpu()))
+    fake_prob = variant_probs[face_variant]
 
-    raw_score = float(np.mean(scores))
-
-    # Preserve the original supplied application's prediction convention.
-    prediction = "Real" if raw_score >= threshold else "Fake"
-    confidence = max(raw_score, 1 - raw_score) * 100
+    prediction = "Fake" if fake_prob >= threshold else "Real"
+    confidence = max(fake_prob, 1 - fake_prob) * 100
 
     return {
         "prediction": prediction,
         "label": "FACE MORPHING" if prediction == "Fake" else "REAL",
         "confidence": round(confidence, 2),
-        "raw_score": round(raw_score, 4),
+        "raw_score": round(fake_prob, 4),
+        "fake_probability": round(fake_prob, 4),
         "pipeline": "Face Morphing",
+        "variant": face_variant,
+        "ensemble_size": len(face_bundles),
+        "variant_probabilities": {
+            v: round(p, 4) for v, p in variant_probs.items()
+        },
         "tta_enabled": use_tta,
-        "face_crop_enabled": use_face_crop,
+        "face_crop_enabled": crop_applied,
         "preprocess_enabled": use_preprocess
     }
 
 
 # ============================================================
-# AUDIO DEEPFAKE
+# AUDIO DEEPFAKE (unchanged)
 # ============================================================
 
 def extract_audio_mfcc(audio_path, n_mfcc=40, sr=16000):
@@ -687,10 +685,7 @@ def extract_audio_mfcc(audio_path, n_mfcc=40, sr=16000):
     mfcc_delta = librosa.feature.delta(mfcc)
     mfcc_delta2 = librosa.feature.delta(mfcc, order=2)
 
-    features = np.concatenate(
-        [mfcc, mfcc_delta, mfcc_delta2],
-        axis=0
-    )
+    features = np.concatenate([mfcc, mfcc_delta, mfcc_delta2], axis=0)
 
     features = (
         features - features.mean(axis=1, keepdims=True)
@@ -707,18 +702,13 @@ def predict_audio(audio_path, threshold=0.5):
 
     features = extract_audio_mfcc(audio_path)
 
-    features_resized = cv2.resize(
-        features,
-        (224, 224)
-    )
+    features_resized = cv2.resize(features, (224, 224))
 
     f_min = features_resized.min()
     f_max = features_resized.max()
 
     if f_max > f_min:
-        features_resized = (
-            features_resized - f_min
-        ) / (f_max - f_min)
+        features_resized = (features_resized - f_min) / (f_max - f_min)
 
     tensor = (
         torch.FloatTensor(features_resized)
@@ -748,77 +738,68 @@ def predict_audio(audio_path, threshold=0.5):
 # VIDEO PREDICTION
 #
 # Each sampled frame is scored by BOTH specialist pipelines:
-#   - the face-morphing fusion model (face-swap / morph artifacts)
-#   - the AI-generated 5-fold EfficientNet-B1 ensemble (fully
-#     synthetic / generated frames)
-#
-# The two per-frame fake-probabilities are blended with the AI-
-# generated ensemble holding the majority weight (see
-# VIDEO_AI_GENERATED_WEIGHT / VIDEO_FACE_MORPH_WEIGHT above), then
-# the video-level verdict is a soft vote (average fused probability,
-# thresholded once) rather than a hard per-frame majority vote.
+#   - the face-morphing model (face-swap / morph artifacts)
+#   - the AI-generated EfficientNet-B1 ensemble (fully synthetic)
+# Per-frame fake probabilities are blended using
+# VIDEO_AI_GENERATED_WEIGHT / VIDEO_FACE_MORPH_WEIGHT, and the
+# video verdict is a soft vote (mean fused probability, thresholded).
 # ============================================================
 
 def extract_frames(video_path, max_frames=20):
     frames = []
 
     cap = cv2.VideoCapture(video_path)
-
     total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    step = max(1, total // max_frames)
 
-    count = 0
+    # Fast path: seek to evenly spaced frames instead of decoding everything.
+    if total > 0:
+        indices = np.linspace(0, total - 1, min(max_frames, total)).astype(int)
 
-    while cap.isOpened():
-        ret, frame = cap.read()
-
-        if not ret:
-            break
-
-        if count % step == 0:
-            frame = cv2.cvtColor(
-                frame,
-                cv2.COLOR_BGR2RGB
-            )
-            frames.append(Image.fromarray(frame))
-
-        count += 1
+        for idx in indices:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, int(idx))
+            ret, frame = cap.read()
+            if ret:
+                frames.append(Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)))
 
     cap.release()
+
+    # Fallback: sequential read (container with unreliable frame count / seeking).
+    if not frames:
+        cap = cv2.VideoCapture(video_path)
+        count = 0
+
+        while cap.isOpened():
+            ret, frame = cap.read()
+            if not ret:
+                break
+
+            if count % 10 == 0:
+                frames.append(Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)))
+                if len(frames) >= max_frames:
+                    break
+
+            count += 1
+
+        cap.release()
 
     return frames
 
 
-def _face_morph_fake_probability(
-    frame,
-    use_tta,
-    use_face_crop,
-    use_preprocess
-):
-    """
-    Runs the face-morphing fusion model on a single frame and returns
-    its fake-probability (0-1), independent of any threshold, so it
-    can be safely blended with the AI-generated ensemble's score.
-    """
+def _face_morph_fake_probability(frame, threshold, use_tta, use_face_crop, use_preprocess):
+    """P(fake) from the face-morphing pipeline (already fake-oriented)."""
     result = predict_face_morphing(
         frame,
-        threshold=0.5,
+        threshold=threshold,
         use_tta=use_tta,
         use_face_crop=use_face_crop,
         use_preprocess=use_preprocess
     )
-    # predict_face_morphing's raw_score follows the "higher = more
-    # real" convention (see comment in that function), so flip it.
-    return 1.0 - result["raw_score"]
+    return result["raw_score"]
 
 
 def _ai_generated_fake_probability(frame):
-    """
-    Runs the AI-generated 5-fold ensemble on a single frame and
-    returns its fake-probability (0-1).
-    """
+    """P(fake) from the AI-generated ensemble."""
     result = predict_ai_generated(frame)
-    # predict_ai_generated's raw_score is already P(fake).
     return result["raw_score"]
 
 
@@ -848,6 +829,7 @@ def predict_video(
         try:
             face_fake_prob = _face_morph_fake_probability(
                 frame,
+                threshold=0.5,
                 use_tta=use_tta,
                 use_face_crop=use_face_crop,
                 use_preprocess=use_preprocess
@@ -868,9 +850,6 @@ def predict_video(
     if not fused_fake_probs:
         raise RuntimeError("No video frames could be predicted.")
 
-    # Soft vote: average the fused per-frame probability once, then
-    # threshold that single number, instead of averaging confidences
-    # of frames that may have disagreed with each other.
     video_fake_prob = float(np.mean(fused_fake_probs))
     final_prediction = "Fake" if video_fake_prob >= threshold else "Real"
     confidence = max(video_fake_prob, 1 - video_fake_prob) * 100
@@ -897,8 +876,7 @@ def predict_video(
 
 
 # ============================================================
-# AI-GENERATED IMAGE PREDICTION
-# Exact logic from the supplied EfficientNet-B1 5-fold app.
+# AI-GENERATED IMAGE PREDICTION (unchanged)
 # ============================================================
 
 def predict_ai_generated(image):
@@ -920,41 +898,21 @@ def predict_ai_generated(image):
             else:
                 summed_probabilities += probabilities
 
-        probabilities = (
-            summed_probabilities / len(ai_ensemble_models)
-        )
+        probabilities = summed_probabilities / len(ai_ensemble_models)
 
-        predicted_index = int(
-            torch.argmax(probabilities).item()
-        )
+        predicted_index = int(torch.argmax(probabilities).item())
 
     predicted_class = ai_class_names[predicted_index]
 
-    fake_probability = float(
-        probabilities[ai_fake_index].item() * 100
-    )
+    fake_probability = float(probabilities[ai_fake_index].item() * 100)
+    real_probability = float(probabilities[ai_real_index].item() * 100)
+    confidence = float(probabilities[predicted_index].item() * 100)
 
-    real_probability = float(
-        probabilities[ai_real_index].item() * 100
-    )
-
-    confidence = float(
-        probabilities[predicted_index].item() * 100
-    )
-
-    label = (
-        "AI GENERATED"
-        if predicted_index == ai_fake_index
-        else "REAL"
-    )
+    is_fake = predicted_index == ai_fake_index
 
     return {
-        "prediction": (
-            "Fake"
-            if predicted_index == ai_fake_index
-            else "Real"
-        ),
-        "label": label,
+        "prediction": "Fake" if is_fake else "Real",
+        "label": "AI GENERATED" if is_fake else "REAL",
         "class_name": predicted_class,
         "confidence": round(confidence, 2),
         "raw_score": round(fake_probability / 100.0, 4),
@@ -974,6 +932,11 @@ def predict_ai_generated(image):
 # ROUTES
 # ============================================================
 
+IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp"}
+AUDIO_EXTS = {".wav", ".mp3", ".m4a", ".flac", ".ogg"}
+VIDEO_EXTS = {".mp4", ".avi", ".mov", ".mkv", ".flv", ".webm"}
+
+
 @app.route("/")
 def index():
     return render_template(
@@ -990,7 +953,10 @@ def health():
     return jsonify({
         "status": "ok",
         "device": str(DEVICE),
-        "face_morphing_model_loaded": fusion_model is not None,
+        "face_morphing_model_loaded": len(face_bundles) > 0,
+        "face_morphing_ensemble_size": len(face_bundles),
+        "face_morphing_variant": face_variant,
+        "face_crop_forced": FACE_FORCE_CROP,
         "audio_model_loaded": audio_model is not None,
         "ai_generated_model_loaded": len(ai_ensemble_models) > 0,
         "ai_generated_model": AI_MODEL_NAME,
@@ -1008,65 +974,28 @@ def api_predict():
 
     try:
         if "file" not in request.files:
-            return jsonify({
-                "success": False,
-                "error": "No file provided."
-            }), 400
+            return jsonify({"success": False, "error": "No file provided."}), 400
 
         file = request.files["file"]
 
         if not file or not file.filename:
-            return jsonify({
-                "success": False,
-                "error": "No file selected."
-            }), 400
+            return jsonify({"success": False, "error": "No file selected."}), 400
 
-        analysis_type = request.form.get(
-            "type",
-            "face_morph"
-        ).lower()
+        analysis_type = request.form.get("type", "face_morph").lower()
+        threshold = float(request.form.get("threshold", 0.5))
 
-        threshold = float(
-            request.form.get("threshold", 0.5)
-        )
+        use_tta = request.form.get("tta", "false").lower() == "true"
+        use_face_crop = request.form.get("face_crop", "false").lower() == "true"
+        use_preprocess = request.form.get("preprocess", "false").lower() == "true"
 
-        use_tta = (
-            request.form.get("tta", "false").lower()
-            == "true"
-        )
-
-        use_face_crop = (
-            request.form.get("face_crop", "false").lower()
-            == "true"
-        )
-
-        use_preprocess = (
-            request.form.get("preprocess", "false").lower()
-            == "true"
-        )
-
-        filename = (
-            f"{uuid.uuid4().hex}_"
-            f"{secure_filename(file.filename)}"
-        )
-
+        filename = f"{uuid.uuid4().hex}_{secure_filename(file.filename)}"
         filepath = UPLOAD_DIR / filename
         file.save(str(filepath))
 
         ext = filepath.suffix.lower()
 
-        # ----------------------------------------------------
-        # AI-GENERATED IMAGE
-        # ----------------------------------------------------
-        if analysis_type in {
-            "ai_generated",
-            "ai",
-            "ai_image"
-        }:
-            if ext not in {
-                ".jpg", ".jpeg", ".png",
-                ".gif", ".bmp", ".webp"
-            }:
+        if analysis_type in {"ai_generated", "ai", "ai_image"}:
+            if ext not in IMAGE_EXTS:
                 return jsonify({
                     "success": False,
                     "error": "AI-generated detection requires an image."
@@ -1075,18 +1004,8 @@ def api_predict():
             image = Image.open(filepath).convert("RGB")
             result = predict_ai_generated(image)
 
-        # ----------------------------------------------------
-        # FACE MORPHING IMAGE
-        # ----------------------------------------------------
-        elif analysis_type in {
-            "face_morph",
-            "face_morphing",
-            "image"
-        }:
-            if ext not in {
-                ".jpg", ".jpeg", ".png",
-                ".gif", ".bmp", ".webp"
-            }:
+        elif analysis_type in {"face_morph", "face_morphing", "image"}:
+            if ext not in IMAGE_EXTS:
                 return jsonify({
                     "success": False,
                     "error": "Face morphing detection requires an image."
@@ -1102,35 +1021,17 @@ def api_predict():
                 use_preprocess=use_preprocess
             )
 
-        # ----------------------------------------------------
-        # AUDIO DEEPFAKE
-        # ----------------------------------------------------
-        elif analysis_type in {
-            "audio",
-            "audio_deepfake"
-        }:
-            if ext not in {
-                ".wav", ".mp3", ".m4a",
-                ".flac", ".ogg"
-            }:
+        elif analysis_type in {"audio", "audio_deepfake"}:
+            if ext not in AUDIO_EXTS:
                 return jsonify({
                     "success": False,
                     "error": "Audio deepfake detection requires an audio file."
                 }), 400
 
-            result = predict_audio(
-                str(filepath),
-                threshold=threshold
-            )
+            result = predict_audio(str(filepath), threshold=threshold)
 
-        # ----------------------------------------------------
-        # VIDEO
-        # ----------------------------------------------------
         elif analysis_type == "video":
-            if ext not in {
-                ".mp4", ".avi", ".mov",
-                ".mkv", ".flv", ".webm"
-            }:
+            if ext not in VIDEO_EXTS:
                 return jsonify({
                     "success": False,
                     "error": "Video detection requires a video file."
@@ -1160,11 +1061,7 @@ def api_predict():
 
     except Exception as exc:
         logger.exception("Prediction failed.")
-
-        return jsonify({
-            "success": False,
-            "error": str(exc)
-        }), 500
+        return jsonify({"success": False, "error": str(exc)}), 500
 
     finally:
         if filepath is not None:
@@ -1184,18 +1081,12 @@ def too_large(error):
 
 @app.errorhandler(404)
 def not_found(error):
-    return jsonify({
-        "success": False,
-        "error": "Endpoint not found."
-    }), 404
+    return jsonify({"success": False, "error": "Endpoint not found."}), 404
 
 
 @app.errorhandler(500)
 def server_error(error):
-    return jsonify({
-        "success": False,
-        "error": "Internal server error."
-    }), 500
+    return jsonify({"success": False, "error": "Internal server error."}), 500
 
 
 # ============================================================
@@ -1207,7 +1098,7 @@ if __name__ == "__main__":
     print("AUTHENTICAI - COMBINED SYNTHETIC MEDIA DETECTOR")
     print("=" * 70)
     print(f"Device                  : {DEVICE}")
-    print(f"Face morphing model     : {fusion_model is not None}")
+    print(f"Face morphing bundles   : {len(face_bundles)}  (variant: {face_variant})")
     print(f"Audio deepfake model    : {audio_model is not None}")
     print(f"AI-generated model      : {len(ai_ensemble_models) > 0}")
     print(f"AI ensemble folds       : {ai_ensemble_fold_ids}")
@@ -1216,8 +1107,10 @@ if __name__ == "__main__":
     print(f"Face detector           : {get_face_detector() is not None}")
     print("=" * 70)
 
+    # use_reloader=False stops debug mode from loading every model twice.
     app.run(
         host="0.0.0.0",
         port=5000,
-        debug=True
+        debug=True,
+        use_reloader=False
     )

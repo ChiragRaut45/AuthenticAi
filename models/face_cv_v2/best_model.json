@@ -1,0 +1,13 @@
+{
+  "best_variant": "eff",
+  "best_variant_name": "EfficientNet-B0",
+  "selected_by": "mean CV validation AUC",
+  "cv_auc_mean": 0.939990767575768,
+  "cv_auc_std": null,
+  "best_fold": 0,
+  "best_fold_val_auc": 0.939990767575768,
+  "threshold_val_tuned": 0.6004519462585449,
+  "bundle": "DATA/models/cv_v2\\best_model_bundle.pth",
+  "test_ensemble_auc": 0.9516265288875958,
+  "test_ensemble_bal_acc": 0.879214351995051
+}

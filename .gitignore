@@ -39,3 +39,6 @@ Thumbs.db
 
 # Jupyter
 .ipynb_checkpoints/
+
+# Local test / backup application
+app1.py
